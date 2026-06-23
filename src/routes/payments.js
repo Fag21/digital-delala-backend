@@ -1,8 +1,9 @@
 const express  = require("express");
+const rateLimit = require("express-rate-limit");
 const { v4: uuidv4 } = require("uuid");
 const supabase = require("../db/supabase");
 const { requireAuth } = require("../middleware/auth");
-const { uploadBase64Image } = require("../services/storage");
+const { decodeAndValidateImage, uploadImageBuffer } = require("../services/storage");
 const {
   sendPaymentNotificationToAdmin,
   sendApprovalEmail,
@@ -16,13 +17,25 @@ const PLANS = {
   yearly:  { price: 399, days: 365 },
 };
 
+/* Per-user rate limit on receipt submission — stops a single account from
+   flooding the admin queue with fake screenshots. Keyed by user id (set by
+   requireAuth), so it is per-account rather than per-IP/shared-NAT. */
+const submitLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000, // 1 hour
+  max: 5,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req) => req.user?.id || req.ip,
+  message: { error: "በጣም ብዙ ጥያቄዎች። እባክዎ ከአንድ ሰዓት በኋላ እንደገና ይሞክሩ" }, // Too many requests, try again in an hour
+});
+
 /* ─────────────────────────────────────────────────────────
    POST /api/payments/submit
    User submits a payment receipt screenshot after depositing.
    Uploads screenshot to Supabase Storage, saves payment record,
    and sends an email notification to the admin.
 ───────────────────────────────────────────────────────── */
-router.post("/submit", requireAuth, async (req, res) => {
+router.post("/submit", requireAuth, submitLimiter, async (req, res) => {
   const { plan, bank, screenshot, txRef } = req.body;
 
   if (!plan || !bank || !screenshot)
@@ -42,10 +55,33 @@ router.post("/submit", requireAuth, async (req, res) => {
   if (existing)
     return res.status(409).json({ error: "You already have a pending payment waiting for approval" });
 
-  // Upload screenshot to Supabase Storage
+  // Server-side validation: decode + verify real MIME/size/dimensions and
+  // compute a content hash, all from the bytes (not the client-sent prefix).
+  let img;
+  try {
+    img = decodeAndValidateImage(screenshot);
+  } catch (e) {
+    // Validation errors are user-safe (Amharic) with status 400.
+    return res.status(e.status || 400).json({ error: e.message || "ትክክለኛ ምስል አይደለም" });
+  }
+
+  // Duplicate-receipt check: reject if this exact image was already approved
+  // for ANY account (re-using one real receipt to claim premium twice).
+  const { data: dupe } = await supabase
+    .from("payments")
+    .select("id")
+    .eq("screenshot_hash", img.hash)
+    .eq("status", "approved")
+    .limit(1)
+    .maybeSingle();
+
+  if (dupe)
+    return res.status(409).json({ error: "ይህ ደረሰኝ ቀደም ሲል ጥቅም ላይ ውሏል" }); // This receipt has already been used
+
+  // Upload the validated screenshot to Supabase Storage
   let screenshotUrl;
   try {
-    screenshotUrl = await uploadBase64Image(screenshot, "payment-receipts");
+    screenshotUrl = await uploadImageBuffer(img.buffer, "payment-receipts", img.mime, img.ext);
   } catch (e) {
     console.error("Screenshot upload failed:", e.message);
     return res.status(500).json({ error: "Failed to upload screenshot. Please try again." });
@@ -55,14 +91,15 @@ router.post("/submit", requireAuth, async (req, res) => {
   const { data: payment, error } = await supabase
     .from("payments")
     .insert({
-      id:             uuidv4(),
-      user_id:        req.user.id,
+      id:              uuidv4(),
+      user_id:         req.user.id,
       plan,
-      amount:         PLANS[plan].price,
+      amount:          PLANS[plan].price,
       bank,
-      screenshot_url: screenshotUrl,
-      tx_ref:         txRef || null,
-      status:         "pending",
+      screenshot_url:  screenshotUrl,
+      screenshot_hash: img.hash,
+      tx_ref:          txRef || null,
+      status:          "pending",
     })
     .select("id, plan, amount, bank, status, created_at")
     .single();
@@ -105,8 +142,8 @@ router.get("/my", requireAuth, async (req, res) => {
    Admin only — returns all payments with user info.
    Supports ?status=pending|approved|rejected|all
 ───────────────────────────────────────────────────────── */
-router.get("/all", requireAuth, async (req, res) => {
-  // Only the admin email can access this endpoint
+router.get("/all", async (req, res) => {
+  // Admin auth is the shared secret only (NOT a user JWT) — do not run requireAuth here.
   const adminSecret = req.headers["x-admin-secret"];
 if (adminSecret !== process.env.ADMIN_SECRET)
   return res.status(403).json({ error: "Admin access only" });
@@ -140,7 +177,7 @@ if (adminSecret !== process.env.ADMIN_SECRET)
    2. Sets user is_premium = true with correct expiry date
    3. Sends approval confirmation email to user
 ───────────────────────────────────────────────────────── */
-router.post("/:id/approve", requireAuth, async (req, res) => {
+router.post("/:id/approve", async (req, res) => {
 const adminSecret = req.headers["x-admin-secret"];
 if (adminSecret !== process.env.ADMIN_SECRET)
   return res.status(403).json({ error: "Admin access only" });
@@ -217,7 +254,7 @@ if (adminSecret !== process.env.ADMIN_SECRET)
    1. Updates payment status to "rejected" with note
    2. Sends rejection email to user explaining why
 ───────────────────────────────────────────────────────── */
-router.post("/:id/reject", requireAuth, async (req, res) => {
+router.post("/:id/reject", async (req, res) => {
  const adminSecret = req.headers["x-admin-secret"];
  if (adminSecret !== process.env.ADMIN_SECRET)
   return res.status(403).json({ error: "Admin access only" });

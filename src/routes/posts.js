@@ -47,8 +47,13 @@ router.post("/", requireAuth, async (req, res) => {
   if (!photo) return res.status(400).json({ error: "ፎቶ ያስፈልጋል" });
 
   let photoUrl;
-  try { photoUrl = await uploadBase64Image(photo, "post-photos"); }
-  catch (e) { return res.status(500).json({ error: "ፎቶ ሊጫን አልቻለም" }); }
+  try {
+    ({ url: photoUrl } = await uploadBase64Image(photo, "post-photos"));
+  } catch (e) {
+    // Validation failures carry a user-safe message + 400; everything else is a 500.
+    if (e.status === 400) return res.status(400).json({ error: e.message });
+    return res.status(500).json({ error: "ፎቶ ሊጫን አልቻለም" });
+  }
 
   const { data: post, error } = await supabase.from("posts")
     .insert({ id: randomUUID(), owner_id: req.user.id, title, description, address,

@@ -15,7 +15,7 @@ async function requireAuth(req, res, next) {
   }
   const { data: user, error } = await supabase
     .from("users")
-    .select("id, name, email, intent, city, is_premium, premium_plan, premium_expiry")
+    .select("id, name, email, intent, city, is_premium, premium_plan, premium_expiry, is_verified, auth_provider")
     .eq("id", payload.sub)
     .single();
   if (error || !user) return res.status(401).json({ error: "ተጠቃሚ አልተገኘም" });

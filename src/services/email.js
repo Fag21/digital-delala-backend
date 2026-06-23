@@ -51,6 +51,21 @@ async function sendRejectionEmail({ toEmail, toName, reason }) {
   });
 }
 
+async function sendOtpEmail({ toEmail, toName, code }) {
+  await transporter.sendMail({
+    from:    `"Digital Delala" <${process.env.SMTP_USER}>`,
+    to:      toEmail,
+    subject: `[Delala] የማረጋገጫ ኮድ / Your verification code: ${code}`,
+    html: `<div style="font-family:sans-serif;max-width:420px">
+      <h2 style="color:#0f6c45">ኢሜይልዎን ያረጋግጡ / Verify your email</h2>
+      <p>ሰላም <b>${toName || ''}</b>! የማረጋገጫ ኮድዎ ይኸውና።</p>
+      <p>Hello <b>${toName || ''}</b>! Use the code below to verify your email.</p>
+      <div style="font-size:32px;font-weight:800;letter-spacing:8px;color:#0f6c45;background:#f0f7f3;border-radius:12px;padding:16px;text-align:center;margin:18px 0">${code}</div>
+      <p style="color:#666;font-size:13px">ይህ ኮድ በ10 ደቂቃ ውስጥ ጊዜው ያልፋል። / This code expires in 10 minutes. If you didn't request it, ignore this email.</p>
+    </div>`,
+  });
+}
+
 async function sendHelpTicket({ name, email, type, message }) {
   await transporter.sendMail({
     from: `"Digital Delala" <${process.env.SMTP_USER}>`,
@@ -65,4 +80,4 @@ async function sendHelpTicket({ name, email, type, message }) {
   });
 }
 
-module.exports = { sendPaymentNotificationToAdmin, sendApprovalEmail, sendRejectionEmail, sendHelpTicket };
+module.exports = { sendPaymentNotificationToAdmin, sendApprovalEmail, sendRejectionEmail, sendHelpTicket, sendOtpEmail };
